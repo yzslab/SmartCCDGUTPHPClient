@@ -1,4 +1,5 @@
 # Smart CCDGUT PHP Client
+![](https://zhensheng.im/wp-content/uploads/2018/11/SmartCCDGUTPHPClient.png)
 ## Requirements
 PHP >= 7.0
 
@@ -21,3 +22,4 @@ Query electric usage details
 ```
 ./SmartCCDGUT USERNAME [area] [room]
 ```
+![](https://zhensheng.im/wp-content/uploads/2018/11/SmartCCDGUTPHPClient-SelectArea.png)
