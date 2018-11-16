@@ -1,0 +1,667 @@
+#!/usr/bin/env php
+<?php
+/**
+ * Created by PhpStorm.
+ * User: Zhensheng
+ * Date: 2018/11/16
+ * Time: 23:00
+ */
+
+namespace SmartCCDGUT;
+
+abstract class Constants
+{
+    const SCHEMA = "https";
+
+    const HOST = "smart.ccdgut.edu.cn";
+
+    const SLAT = 'jw134#%pqNLVfn';
+
+    const URIS = [
+        "login" => "/app/user/login",
+        "logout" => "/app/user/logout",
+        "electric" => "/data.php",
+    ];
+
+    const CREDENTIAL_SAVE_DIRECTORY = __DIR__ . "/credentials/";
+
+    public static function namedUrl($name)
+    {
+        return static::url(static::URIS[$name]);
+    }
+
+    public static function url($uri)
+    {
+        return sprintf("%s://%s%s", Constants::SCHEMA, Constants::HOST, $uri);
+    }
+
+    public static function hasher($plainText)
+    {
+        return md5(md5(Constants::SLAT . $plainText));
+    }
+
+    public static function userCredentialFilePath($username)
+    {
+        @mkdir(static::CREDENTIAL_SAVE_DIRECTORY, 0700, true);
+        return sprintf("%s%s", static::CREDENTIAL_SAVE_DIRECTORY, $username);
+    }
+}
+
+if (!function_exists("\\readline")) {
+    function readline($prompt = "")
+    {
+        echo $prompt;
+        return stream_get_line(STDIN, 1024, PHP_EOL);
+    }
+}
+
+final class Common
+{
+    final public static function readline($prompt)
+    {
+        return readline($prompt);
+    }
+
+    final public static function log($text)
+    {
+        self::fprintf(STDOUT, $text);
+    }
+
+    final public static function logf($format, ... $args)
+    {
+        self::fprintf(STDOUT, $format, ... $args);
+    }
+
+    final public static function error($text)
+    {
+        self::fprintf(STDERR, $text);
+    }
+
+    final public static function errorf($format, ... $args)
+    {
+        self::fprintf(STDERR, $format, ... $args);
+    }
+
+    private static function fprintf($resource, $format, ... $args)
+    {
+        return \fprintf($resource, $format, ... $args);
+    }
+}
+
+class SmartCCDGUTException extends \Exception
+{
+}
+
+/**
+ * Class Argv
+ * @package SmartCCDGUT
+ * @property-read array $originArgv
+ * @property-read array $argv
+ * @property-read string $file
+ * @property-read string $command
+ */
+class Argv
+{
+    /**
+     * @var Argv $globalInstance
+     */
+    public static $globalInstance;
+
+    private $originArgv;
+
+    private $argv;
+
+    private $file;
+
+    private $command;
+
+    public function __construct($argv = null)
+    {
+        if (is_null($argv)) {
+            $argv = $_SERVER["argv"];
+        }
+
+        $this->originArgv = $argv;
+
+        $this->file = @array_shift($argv);
+        $this->command = @array_shift($argv);
+
+        $this->argv = $argv;
+    }
+
+    public function setAsGlobal()
+    {
+        static::$globalInstance = $this;
+        return $this;
+    }
+
+    public function __get($name)
+    {
+        return $this->{$name};
+    }
+
+    public function at($index)
+    {
+        return @$this->argv[$index];
+    }
+
+    public function atOrigin($index)
+    {
+        return @$this->originArgv[$index];
+    }
+}
+
+class CommandRouter
+{
+    private $controllers = [];
+
+    private $singletons = [];
+
+    private $singletonInstances = [];
+
+    private $normalProviders = [];
+
+    private $names = [];
+
+    public function __construct()
+    {
+        $argv = new Argv();
+        $argv->setAsGlobal();
+
+        $this->controllers = [
+            "login" => SmartCCDGUTLoginController::class . "@login",
+            "logout" => SmartCCDGUTLoginController::class . "@logout",
+            "electric" => SmartCCDGUTElectricQueryController::class . "@query",
+        ];
+
+        $this->singletons = [
+            Argv::class => Argv::class,
+        ];
+
+        $this->singletonInstances[Argv::class] = Argv::$globalInstance;
+
+        $this->normalProviders = [
+            SmartCCDGUTNetwork::class => function () {
+                $smartCCDGUTNetwork = new SmartCCDGUTNetwork(Constants::namedUrl(Argv::$globalInstance->command));
+                if (Credential::$globalInstance instanceof Credential)
+                    $smartCCDGUTNetwork->setCredential(Credential::$globalInstance);
+                return $smartCCDGUTNetwork;
+            },
+            Credential::class => function () {
+                $username = Argv::$globalInstance->at(0);
+                if (empty($username)) {
+                    throw new SmartCCDGUTException("username is required by command " . Argv::$globalInstance->command . ".");
+                }
+                $userCredentialFilePath = Constants::userCredentialFilePath($username);
+                if (!file_exists($userCredentialFilePath)) {
+                    throw new SmartCCDGUTException("User " . $username . " not login.");
+                }
+                $decodedContent = json_decode(file_get_contents($userCredentialFilePath));
+                if (is_null($decodedContent)) {
+                    throw new SmartCCDGUTException("Invalid credential file: " . json_last_error_msg());
+                }
+
+                $credential = new Credential($decodedContent->userToken, $decodedContent->token, $decodedContent->userId);
+                $credential->setAsGlobal();
+                return $credential;
+            }
+        ];
+
+        $this->names = [
+            "apiUrl" => function () {
+                return Constants::namedUrl(Argv::$globalInstance->command);
+            },
+        ];
+    }
+
+    public static function start()
+    {
+        try {
+            $commandRouter = new CommandRouter();
+            $result = $commandRouter->run();
+
+            if (is_string($result)) {
+                Common::log($result);
+            } else {
+                var_dump($result);
+            }
+        } catch (SmartCCDGUTException $e) {
+            Common::errorf("[CODE %d]: %s" . PHP_EOL, $e->getCode(), $e->getMessage());
+        }
+    }
+
+    public function run()
+    {
+        $controller = self::make(Argv::$globalInstance->command);
+
+        $parameters = $this->resolveParameters($controller);
+
+        return call_user_func($controller, ... $parameters);
+    }
+
+    public static function helpMessage()
+    {
+        Common::errorf("Usage: %s COMMAND%s", __FILE__, PHP_EOL);
+        Common::errorf("Available commands:" . PHP_EOL);
+        Common::errorf("\tlogin [USERNAME] [PASSWORD]\t\tLogin to Smart CCDGUT and save token." . PHP_EOL);
+        Common::errorf("\tlogout USERNAME\t\tLogout." . PHP_EOL);
+        Common::errorf("\telectric USERNAME\t\tQuery electric usage details." . PHP_EOL);
+    }
+
+    private function make($command)
+    {
+        if (!array_key_exists($command, $this->controllers)) {
+            static::helpMessage();
+            exit(1);
+        }
+
+        $controller = $this->controllers[$command];
+        if (is_callable($controller)) {
+            return $controller;
+        }
+
+        @list($controllerClass, $method) = explode("@", $controller, 2);
+        $controllerObject = new $controllerClass;
+        if (empty($method)) {
+            return $controllerObject;
+        }
+        return [$controllerObject, $method];
+    }
+
+    private function resolveParameters($callable)
+    {
+        $parameters = [];
+        $reflectionParameters = $this->getParameters($callable);
+        $argvIndex = 0;
+        foreach ($reflectionParameters as $index => $parameter) {
+            $parameterName = $parameter->getName();
+            if ($parameter->hasType()) {
+                $reflectionClass = $parameter->getClass();
+                $className = $reflectionClass->getName();
+
+                // Is singleton?
+                if (array_key_exists($className, $this->singletons)) {
+                    // Is instance exists?
+                    if (!array_key_exists($className, $this->singletonInstances)) {
+                        // Create instance and store it on not exists
+                        if (is_callable($this->singletons[$className])) {
+                            $instance = call_user_func($this->singletons[$className]);
+                        } else {
+                            $instance = new $className;
+                        }
+                        $this->singletonInstances[$className] = $instance;
+                    }
+
+                    // Add singleton instance to $parameters
+                    $parameters[] = $this->singletonInstances[$className];
+                } else {
+                    if (array_key_exists($className, $this->normalProviders)) {
+                        $parameters[] = call_user_func($this->normalProviders[$className]);
+                    } else {
+                        // Simply create an instance
+                        $parameters[] = new $className;
+                    }
+                }
+            } else {
+                if (array_key_exists($parameterName, $this->names)) {
+                    $parameters[] = call_user_func($this->names[$parameterName]);
+                } else {
+                    // Simply retrieve next argv
+                    $parameters[] = Argv::$globalInstance->at($argvIndex++);
+                }
+            }
+        }
+
+        return $parameters;
+    }
+
+    private function getParameters($callable)
+    {
+        $CReflection = is_array($callable) ? new \ReflectionMethod($callable[0],
+            $callable[1]) : new \ReflectionFunction($callable);
+        return $CReflection->getParameters();
+    }
+}
+
+class Credential
+{
+    /**
+     * @var Credential
+     */
+    public static $globalInstance;
+
+    public $userToken;
+    public $token;
+    public $userId;
+
+    public function __construct($userToken = null, $token = null, $userId = null)
+    {
+        $this->userToken = $userToken;
+        $this->token = $token;
+        $this->userId = $userId;
+    }
+
+    public function setAsGlobal()
+    {
+        self::$globalInstance = $this;
+    }
+}
+
+class SmartCCDGUTLoginController
+{
+    /**
+     * @param SmartCCDGUTNetwork $smartCCDGUTNetwork
+     * @param null $username
+     * @param null $password
+     * @return string
+     * @throws SmartCCDGUTException
+     * @throws SmartCCDGUTNetworkException
+     */
+    public function login(SmartCCDGUTNetwork $smartCCDGUTNetwork, $username = null, $password = null)
+    {
+        if (empty($username)) {
+            $username = Common::readline("Username: ");
+        }
+
+        if (empty($password)) {
+            $password = Common::readline("Password: ");
+        }
+
+        $credential = new Credential();
+
+        $smartCCDGUTNetwork
+            ->curlSetopt(function ($ch) use ($credential) {
+                curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($ch, $header) use ($credential) {
+                    @list($name, $value) = explode(": ", $header, 2);
+                    $name = trim($name);
+                    $value = trim($value);
+                    switch ($name) {
+                        case "XPS-UserToken":
+                            $credential->userToken = $value;
+                            break;
+                        case "XPS-Token":
+                            $credential->token = $value;
+                            break;
+                        case "XPS-UserId":
+                            $credential->userId = $value;
+                            break;
+                    }
+                    return strlen($header);
+                });
+            })
+            ->addPostField("account", $username)
+            ->addPostField("password", Constants::hasher($password))
+            ->addPostField("sign", "2");
+
+        $result = $smartCCDGUTNetwork->preformDecodeOrFail();
+        if ($result->result == "0") {
+            throw new SmartCCDGUTNetworkException($result->msg);
+        }
+
+        if (empty($credential->userToken) || empty($credential->token) || empty($credential->userId)) {
+            throw new SmartCCDGUTException("Login failed with invalid token.");
+        }
+
+        file_put_contents(Constants::userCredentialFilePath($username), json_encode($credential));
+
+        return "Login successfully with credentials save to " . Constants::userCredentialFilePath($username) . "." . PHP_EOL;
+    }
+
+    /**
+     * @param Credential $credential
+     * @param SmartCCDGUTNetwork $smartCCDGUTNetwork
+     * @return string
+     * @throws SmartCCDGUTException
+     * @throws SmartCCDGUTNetworkException
+     */
+    public function logout(Credential $credential, SmartCCDGUTNetwork $smartCCDGUTNetwork, $username)
+    {
+        $smartCCDGUTNetwork->curlSetopt(function ($ch) {
+            curl_setopt($ch, CURLOPT_POST, true);
+        });
+
+        $result = $smartCCDGUTNetwork->preformDecodeOrFail();
+        if ($result->result == "1") {
+            unlink(Constants::userCredentialFilePath($username));
+            return "Logout successfully." . PHP_EOL;
+        }
+        throw new SmartCCDGUTException("Logout unsuccessfully.");
+    }
+}
+
+class SmartCCDGUTElectricQueryController
+{
+    const AVAILABLE_AREAS = [
+        "01" => "学1A",
+        "02" => "学1B",
+        "03" => "学1C",
+        "04" => "学1D",
+        "05" => "学2A",
+        "06" => "学2B",
+        "07" => "学2C",
+        "08" => "学2D",
+        "09" => "学3A",
+        "10" => "学3B",
+        "11" => "学3C",
+        "12" => "学3D",
+        "13" => "学4A",
+        "14" => "学4B",
+        "15" => "学4C",
+        "16" => "学4D",
+        "17" => "学5A",
+        "18" => "学5B",
+        "19" => "学5C",
+        "20" => "学5D",
+        "21" => "学6A",
+        "22" => "学6B",
+        "23" => "学6C",
+        "24" => "学6D",
+        "25" => "学7A",
+        "26" => "学7B",
+        "27" => "学7C",
+        "28" => "学8A",
+        "29" => "学8B",
+        "30" => "学8C",
+        "31" => "学9A",
+        "32" => "学9B",
+        "33" => "学9C",
+        "34" => "学10",
+        "35" => "学11",
+        "36" => "学12",
+    ];
+
+    public function query(Credential $credential, SmartCCDGUTNetwork $smartCCDGUTNetwork, $username, $area = null, $room = null)
+    {
+        if (empty($area)) {
+            Common::logf("%s%s", "Available areas: ", PHP_EOL);
+            Common::logf("%s%s", "Code\t\tName", PHP_EOL);
+            foreach (static::AVAILABLE_AREAS as $code => $name)
+                Common::logf("%s\t\t%s%s", $code, $name, PHP_EOL);
+            Common::log(PHP_EOL);
+            $area = Common::readline("Please select your area by code: ");
+        }
+
+        if (empty($room))
+            $room = Common::readline("Please input your room no: ");
+
+        $smartCCDGUTNetwork
+            ->setApiUrl("http://smart-ccdgut.com/data.php")
+            ->addHeader("Referer: http://smart-ccdgut.com/index.php?needLogin=1&token=" . $credential->token ."&XPS-UserId=" . $credential->userId)
+            ->addPostField("loudong", $area)
+            ->addPostField("sushe", $room)
+            ->addPostField("token", $credential->token)
+            ->addPostField("isBind", "1")
+        ;
+
+        $result = $smartCCDGUTNetwork->preformDecodeOrFail();
+        if ($result->errorNumber != 1)
+            throw new SmartCCDGUTException("Query unsuccessfully", $result->errorNumber);
+
+        $text = sprintf("Electric credit: %s%s%s", $result->remainelectric, PHP_EOL, PHP_EOL);
+        $usage = $result->table;
+        while ($date = array_shift($usage)) {
+            $v = array_shift($usage);
+            $text .= sprintf("%s => %s%s", $date, $v, PHP_EOL);
+        }
+
+        return $text;
+    }
+}
+
+class SmartCCDGUTNetworkException extends SmartCCDGUTException
+{
+}
+
+class SmartCCDGUTNetwork
+{
+    const DEFAULT_USER_AGENT = "iPhone/1.3 (iOS;12.1;1242x2208;s;46001;wifi)";
+
+    private $apiUrl;
+
+    private $userAgent;
+
+    private $headers = [];
+
+    private $postFields = [];
+
+    private $ch;
+
+    public function __construct($apiUrl = null, $userAgent = self::DEFAULT_USER_AGENT)
+    {
+        $this->apiUrl = $apiUrl;
+        $this->userAgent = $userAgent;
+
+        $this->addHeader("XPS-ClientCode: csxy");
+
+        $this->ch = curl_init();
+    }
+
+    public function cURL()
+    {
+        return $this->ch;
+    }
+
+    public function curlSetopt($callable)
+    {
+        call_user_func($callable, $this->cURL());
+        return $this;
+    }
+
+    public function setCredential(Credential $credential)
+    {
+        $this
+            ->addHeader("XPS-Token: " . $credential->token)
+            ->addHeader("XPS-UserId: " . $credential->userId)
+        ;
+        return $this;
+    }
+
+    public function setApiUrl($apiUrl)
+    {
+        $this->apiUrl = $apiUrl;
+        return $this;
+    }
+
+    public function setPostFields($postFields)
+    {
+        $this->postFields = $postFields;
+        return $this;
+    }
+
+    public function addPostField($name, $value)
+    {
+        $this->postFields[$name] = $value;
+        return $this;
+    }
+
+    public function setHeaders($headers)
+    {
+        $this->headers = $headers;
+        return $this;
+    }
+
+    public function addHeader($header)
+    {
+        $this->headers[] = $header;
+        return $this;
+    }
+
+    public function preform()
+    {
+        $ch = $this->cURL();
+
+        curl_setopt($ch, CURLOPT_URL, $this->apiUrl);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_USERAGENT, $this->userAgent);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $this->headers);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYSTATUS, false);
+        if (is_array($this->postFields) && count($this->postFields)) {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($this->postFields));
+        } else {
+            if (!empty($this->postFields)) {
+                curl_setopt($ch, CURLOPT_POSTFIELDS, $this->postFields);
+            }
+        }
+
+        return curl_exec($ch);
+    }
+
+    /**
+     * @return mixed
+     * @throws SmartCCDGUTNetworkException
+     */
+    public function preformOrFail()
+    {
+        $preformResult = $this->preform();
+        if ($preformResult === false) {
+            throw new SmartCCDGUTNetworkException(curl_error($this->cURL()), curl_errno($this->cURL()));
+        }
+        return $preformResult;
+    }
+
+    /**
+     * @return mixed
+     * @throws SmartCCDGUTNetworkException
+     */
+    public function preformDecodeOrFail()
+    {
+        $preformResult = $this->preform();
+        if ($preformResult === false) {
+            throw new SmartCCDGUTNetworkException(curl_error($this->cURL()), curl_errno($this->cURL()));
+        }
+        $decodedResult = json_decode($preformResult);
+        if (is_null($decodedResult)) {
+            throw new SmartCCDGUTNetworkException(json_last_error_msg(), json_last_error());
+        }
+        return $decodedResult;
+    }
+
+    /**
+     * @return mixed
+     * @throws SmartCCDGUTNetworkException
+     */
+    public function preformThenClear()
+    {
+        try {
+            return $this->preformOrFail();
+        } finally {
+            $this->clear();
+        }
+    }
+
+    public function clear()
+    {
+        curl_close($this->cURL());
+    }
+
+    public function __get($name)
+    {
+        return $this->{$name};
+    }
+}
+
+umask(0077);
+
+CommandRouter::start();
