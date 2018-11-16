@@ -9,7 +9,7 @@ json
 ## Usage
 Login first
 ```
-./SmartCCDGUT login USERNAME PASSWORD
+./SmartCCDGUT login [USERNAME] [PASSWORD]
 ```
 
 Logout
