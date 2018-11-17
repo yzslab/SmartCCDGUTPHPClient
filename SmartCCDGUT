@@ -17,17 +17,29 @@ abstract class Constants
 
     const SLAT = 'jw134#%pqNLVfn';
 
-    const URIS = [
+    const APP_URIS = [
         "login" => "/app/user/login",
         "logout" => "/app/user/logout",
-        "electric" => "/data.php",
     ];
 
-    const CREDENTIAL_SAVE_DIRECTORY = __DIR__ . "/credentials/";
+    const URLS = [
+    ];
+
+    const USER_DIRECTORY = __DIR__ . "/users/";
+
+    const CREDENTIAL_FILE_NAME = "credentials";
+
+    const USER_FILE_NAME = "user";
 
     public static function namedUrl($name)
     {
-        return static::url(static::URIS[$name]);
+        if (array_key_exists($name, static::APP_URIS)) {
+            return static::url(static::APP_URIS[$name]);
+        }
+        if (array_key_exists($name, static::URLS)) {
+            return static::URLS[$name];
+        }
+        return null;
     }
 
     public static function url($uri)
@@ -42,8 +54,14 @@ abstract class Constants
 
     public static function userCredentialFilePath($username)
     {
-        @mkdir(static::CREDENTIAL_SAVE_DIRECTORY, 0700, true);
-        return sprintf("%s%s", static::CREDENTIAL_SAVE_DIRECTORY, $username);
+        @mkdir(static::USER_DIRECTORY . $username, 0700, true);
+        return sprintf("%s%s/%s", static::USER_DIRECTORY, $username, static::CREDENTIAL_FILE_NAME);
+    }
+
+    public static function userFilePath($username)
+    {
+        @mkdir(static::USER_DIRECTORY . $username, 0700, true);
+        return sprintf("%s%s/%s", static::USER_DIRECTORY, $username, static::USER_FILE_NAME);
     }
 }
 
@@ -163,53 +181,96 @@ class CommandRouter
 
     private $names = [];
 
-    public function __construct()
+    /**
+     * @var Argv
+     */
+    private $argv;
+
+    public function __construct(Argv $argv)
     {
-        $argv = new Argv();
-        $argv->setAsGlobal();
+        $this->argv = $argv;
 
         $this->controllers = [
             "login" => SmartCCDGUTLoginController::class . "@login",
             "logout" => SmartCCDGUTLoginController::class . "@logout",
             "electric" => SmartCCDGUTElectricQueryController::class . "@query",
+            "attendance" => SmartCCDGUTAttendanceController::class . "@query",
+            "extraCredit" => SmartCCDGUTExtraCredit::class . "@query",
         ];
 
         $this->singletons = [
             Argv::class => Argv::class,
         ];
 
-        $this->singletonInstances[Argv::class] = Argv::$globalInstance;
+        $this->singletonInstances[Argv::class] = $argv;
+
+        $credentialCreator = function () {
+            $username = $this->argv->at(0);
+            if (empty($username)) {
+                throw new SmartCCDGUTException("username is required by command " . $this->argv->command . ".");
+            }
+            $userCredentialFilePath = Constants::userCredentialFilePath($username);
+            if (!file_exists($userCredentialFilePath)) {
+                throw new SmartCCDGUTException("User " . $username . " not login.");
+            }
+            $decodedContent = json_decode(file_get_contents($userCredentialFilePath));
+            if (is_null($decodedContent)) {
+                throw new SmartCCDGUTException("Invalid credential file: " . json_last_error_msg());
+            }
+
+            $credential = new Credential($decodedContent->userToken, $decodedContent->token,
+                $decodedContent->userId);
+            // $credential->setAsGlobal();
+            return $credential;
+        };
 
         $this->normalProviders = [
-            SmartCCDGUTNetwork::class => function () {
-                $smartCCDGUTNetwork = new SmartCCDGUTNetwork(Constants::namedUrl(Argv::$globalInstance->command));
-                if (Credential::$globalInstance instanceof Credential)
-                    $smartCCDGUTNetwork->setCredential(Credential::$globalInstance);
-                return $smartCCDGUTNetwork;
-            },
-            Credential::class => function () {
-                $username = Argv::$globalInstance->at(0);
-                if (empty($username)) {
-                    throw new SmartCCDGUTException("username is required by command " . Argv::$globalInstance->command . ".");
-                }
-                $userCredentialFilePath = Constants::userCredentialFilePath($username);
-                if (!file_exists($userCredentialFilePath)) {
-                    throw new SmartCCDGUTException("User " . $username . " not login.");
-                }
-                $decodedContent = json_decode(file_get_contents($userCredentialFilePath));
-                if (is_null($decodedContent)) {
-                    throw new SmartCCDGUTException("Invalid credential file: " . json_last_error_msg());
+            SmartCCDGUTNetwork::class => function () use ($credentialCreator) {
+                // These urls required token
+                static $tokenRequiredUrls = [
+                    "electric" => "http://smart-ccdgut.com/data.php",
+                    "attendance" => "http://wx.ccdgut.edu.cn:9000/zhcy.htm",
+                    "extraCredit" => "http://218.16.63.158:8990/remote/token",
+                ];
+
+                // These commands required login
+                static $loginRequiredCommands = [
+                    "logout" => true,
+                    "electric" => true,
+                    "attendance" => true,
+                    "extraCredit" => true,
+                ];
+
+                $command = $this->argv->command;
+
+                $smartCCDGUTNetwork = new SmartCCDGUTNetwork();
+
+                if (array_key_exists($command, $loginRequiredCommands)) {
+                    $credential = $credentialCreator();
+                    $smartCCDGUTNetwork->setCredential($credential);
                 }
 
-                $credential = new Credential($decodedContent->userToken, $decodedContent->token, $decodedContent->userId);
-                $credential->setAsGlobal();
-                return $credential;
-            }
+                if (array_key_exists($command, $tokenRequiredUrls)) {
+                    // Create token url
+                    $apiUrl = sprintf("%s?needLogin=1&token=%s&XPS-UserId=%s&", $tokenRequiredUrls[$command],
+                        $credential->token, $credential->userId);
+                } else {
+                    $apiUrl = Constants::namedUrl($command);
+                }
+
+                $smartCCDGUTNetwork->setApiUrl($apiUrl);
+
+                return $smartCCDGUTNetwork;
+            },
+            Credential::class => $credentialCreator,
+            DOMDocumentOperator::class => function () {
+                return new PHPDOMDocument();
+            },
         ];
 
         $this->names = [
             "apiUrl" => function () {
-                return Constants::namedUrl(Argv::$globalInstance->command);
+                return Constants::namedUrl($this->argv->command);
             },
         ];
     }
@@ -217,7 +278,10 @@ class CommandRouter
     public static function start()
     {
         try {
-            $commandRouter = new CommandRouter();
+            $argv = new Argv();
+            $argv->setAsGlobal();
+
+            $commandRouter = new CommandRouter($argv);
             $result = $commandRouter->run();
 
             if (is_string($result)) {
@@ -232,7 +296,7 @@ class CommandRouter
 
     public function run()
     {
-        $controller = self::make(Argv::$globalInstance->command);
+        $controller = self::make($this->argv->command);
 
         $parameters = $this->resolveParameters($controller);
 
@@ -244,8 +308,13 @@ class CommandRouter
         Common::errorf("Usage: %s COMMAND%s", __FILE__, PHP_EOL);
         Common::errorf("Available commands:" . PHP_EOL);
         Common::errorf("\tlogin [USERNAME] [PASSWORD]\t\tLogin to Smart CCDGUT and save token." . PHP_EOL);
-        Common::errorf("\tlogout USERNAME\t\tLogout." . PHP_EOL);
+        Common::errorf("\tlogout USERNAME \t\tLogout." . PHP_EOL);
+        Common::errorf(PHP_EOL);
         Common::errorf("\telectric USERNAME\t\tQuery electric usage details." . PHP_EOL);
+        Common::errorf("\tattendance USERNAME\t\tQuery attendance details." . PHP_EOL);
+        Common::errorf("\textraCredit USERNAME\t\tQuery extraCredit details." . PHP_EOL);
+        Common::errorf(PHP_EOL . PHP_EOL);
+        Common::errorf("Zhensheng Yuan: https://zhensheng.im." . PHP_EOL);
     }
 
     private function make($command)
@@ -307,7 +376,7 @@ class CommandRouter
                     $parameters[] = call_user_func($this->names[$parameterName]);
                 } else {
                     // Simply retrieve next argv
-                    $parameters[] = Argv::$globalInstance->at($argvIndex++);
+                    $parameters[] = $this->argv->at($argvIndex++);
                 }
             }
         }
@@ -351,8 +420,8 @@ class SmartCCDGUTLoginController
 {
     /**
      * @param SmartCCDGUTNetwork $smartCCDGUTNetwork
-     * @param null $username
-     * @param null $password
+     * @param string|null $username
+     * @param string|null $password
      * @return string
      * @throws SmartCCDGUTException
      * @throws SmartCCDGUTNetworkException
@@ -403,18 +472,21 @@ class SmartCCDGUTLoginController
         }
 
         file_put_contents(Constants::userCredentialFilePath($username), json_encode($credential));
+        file_put_contents(Constants::userFilePath($username), json_encode($result->item));
 
-        return "Login successfully with credentials save to " . Constants::userCredentialFilePath($username) . "." . PHP_EOL;
+        $text = sprintf("Hello, %s.%s", $result->item->xm, PHP_EOL);
+        $text .= "Login successfully with credentials save to " . Constants::userCredentialFilePath($username) . "." . PHP_EOL;
+
+        return $text;
     }
 
     /**
-     * @param Credential $credential
      * @param SmartCCDGUTNetwork $smartCCDGUTNetwork
      * @return string
      * @throws SmartCCDGUTException
      * @throws SmartCCDGUTNetworkException
      */
-    public function logout(Credential $credential, SmartCCDGUTNetwork $smartCCDGUTNetwork, $username)
+    public function logout(SmartCCDGUTNetwork $smartCCDGUTNetwork, $username)
     {
         $smartCCDGUTNetwork->curlSetopt(function ($ch) {
             curl_setopt($ch, CURLOPT_POST, true);
@@ -423,6 +495,7 @@ class SmartCCDGUTLoginController
         $result = $smartCCDGUTNetwork->preformDecodeOrFail();
         if ($result->result == "1") {
             unlink(Constants::userCredentialFilePath($username));
+            unlink(Constants::userFilePath($username));
             return "Logout successfully." . PHP_EOL;
         }
         throw new SmartCCDGUTException("Logout unsuccessfully.");
@@ -470,32 +543,38 @@ class SmartCCDGUTElectricQueryController
         "36" => "学12",
     ];
 
-    public function query(Credential $credential, SmartCCDGUTNetwork $smartCCDGUTNetwork, $username, $area = null, $room = null)
-    {
+    public function query(
+        Credential $credential,
+        SmartCCDGUTNetwork $smartCCDGUTNetwork,
+        $username,
+        $area = null,
+        $room = null
+    ) {
         if (empty($area)) {
             Common::logf("%s%s", "Available areas: ", PHP_EOL);
             Common::logf("%s%s", "Code\t\tName", PHP_EOL);
-            foreach (static::AVAILABLE_AREAS as $code => $name)
+            foreach (static::AVAILABLE_AREAS as $code => $name) {
                 Common::logf("%s\t\t%s%s", $code, $name, PHP_EOL);
+            }
             Common::log(PHP_EOL);
             $area = Common::readline("Please select your area by code: ");
         }
 
-        if (empty($room))
+        if (empty($room)) {
             $room = Common::readline("Please input your room no: ");
+        }
 
         $smartCCDGUTNetwork
-            ->setApiUrl("http://smart-ccdgut.com/data.php")
-            ->addHeader("Referer: http://smart-ccdgut.com/index.php?needLogin=1&token=" . $credential->token ."&XPS-UserId=" . $credential->userId)
+            ->addHeader("Referer: http://smart-ccdgut.com/index.php")
             ->addPostField("loudong", $area)
             ->addPostField("sushe", $room)
             ->addPostField("token", $credential->token)
-            ->addPostField("isBind", "1")
-        ;
+            ->addPostField("isBind", "1");
 
         $result = $smartCCDGUTNetwork->preformDecodeOrFail();
-        if ($result->errorNumber != 1)
+        if ($result->errorNumber != 1) {
             throw new SmartCCDGUTException("Query unsuccessfully", $result->errorNumber);
+        }
 
         $text = sprintf("Electric credit: %s%s%s", $result->remainelectric, PHP_EOL, PHP_EOL);
         $usage = $result->table;
@@ -505,6 +584,504 @@ class SmartCCDGUTElectricQueryController
         }
 
         return $text;
+    }
+}
+
+class SmartCCDGUTAttendanceController
+{
+    public function query(
+        SmartCCDGUTNetwork $smartCCDGUTNetwork,
+        DOMDocumentOperator $DOMDocumentOperator
+    ) {
+        $html = $smartCCDGUTNetwork->preformOrFail();
+        $DOMDocumentOperator->setHTML($html);
+
+        $elements = $DOMDocumentOperator->getElementByClass("card");
+
+        $text = "";
+
+        foreach ($elements as $element) {
+            $cardChildElements = $element->getChildElements();
+            $time = trim($cardChildElements[1]->getTextContent());
+            $lesson = trim($cardChildElements[3]->getTextContent());
+
+            $text .= sprintf("%s => %s%s", $time, $lesson, PHP_EOL);
+        }
+
+        return $text;
+    }
+}
+
+class SmartCCDGUTExtraCredit
+{
+    public function query(
+        SmartCCDGUTNetwork $smartCCDGUTNetwork,
+        DOMDocumentOperator $DOMDocumentOperator
+    ) {
+        $html = $smartCCDGUTNetwork->preformOrFail();
+        $DOMDocumentOperator->setHTML($html);
+
+        $items = $DOMDocumentOperator->getElementByClass("mui-media-body");
+
+        $summary = trim(array_shift($items)->getTextContent());
+
+        $text = $summary . PHP_EOL . PHP_EOL;
+
+        foreach ($items as $DOMElementOperator) {
+            $childElements = $DOMElementOperator->getChildElements();
+            $itemName = trim($childElements[0]->getText());
+            $itemCredit = trim($childElements[1]->getTextContent());
+            $itemStatus = trim($childElements[3]->getChildElements()[1]->getTextContent());
+
+            $text .= sprintf("%s". PHP_EOL ."\t%s\t%s" . PHP_EOL . PHP_EOL, $itemName, $itemCredit, $itemStatus);
+        }
+
+        return $text;
+    }
+}
+
+class DOMException extends SmartCCDGUTException
+{
+
+}
+
+interface DOMDocumentOperator
+{
+    /**
+     * @return \DOMDocument
+     */
+    public function DOMDocument();
+
+    /**
+     * @return \DOMXPath
+     */
+    public function DOMXPath();
+
+    /**
+     * @param string $html
+     * @param int $options
+     * @return mixed
+     */
+    public function setHTML($html = "", $options = 0);
+
+    /**
+     * @param string $id
+     * @return DOMElementOperator
+     */
+    public function getElementById($id);
+
+    /**
+     * @param string $tagName
+     * @return DOMElementOperator[]
+     */
+    public function getElementsByTagName($tagName);
+
+    /**
+     * @param string|string[] $class
+     * @return DOMElementOperator[]
+     */
+    public function getElementByClass($class);
+}
+
+class PHPDOMDocument implements DOMDocumentOperator
+{
+    /**
+     * @var \DOMDocument $document
+     */
+    private $document;
+
+    /**
+     * @var \DOMXPath $XPath
+     */
+    private $XPath;
+
+    /**
+     * PHPDOMDocument constructor.
+     * @param null $html
+     * @param int $options
+     * @throws DOMException
+     */
+    public function __construct($html = null, $options = 0, $charset = null)
+    {
+        if (!is_null($html)) {
+            $this->setHTML($html, $options, $charset);
+        }
+    }
+
+    /**
+     * @return \DOMDocument
+     */
+    public function DOMDocument()
+    {
+        return $this->document;
+    }
+
+    public function DOMXPath()
+    {
+        return $this->XPath;
+    }
+
+    /**
+     * @param string $html
+     * @param int $options
+     * @param null $charset
+     * @return mixed|void
+     * @throws DOMException
+     */
+    public function setHTML($html = "", $options = 0, $charset = null)
+    {
+        $this->document = new \DOMDocument();
+        if (!defined("DEBUG")) {
+            libxml_use_internal_errors(true);
+        }
+        if (!$this->document->loadHTML($html, $options)) {
+            // printf(STDERR, $html);
+            throw new DOMException();
+        }
+        if (!is_null($charset)) {
+            $this->document->encoding = $charset;
+        }
+        libxml_clear_errors();
+        $this->XPath = new \DOMXPath($this->document);
+    }
+
+    public function getElementById($id)
+    {
+        return new PHPDOMElement($this->document->getElementById($id));
+    }
+
+    public function getElementsByTagName($tagName)
+    {
+        $elements = [];
+        foreach ($this->document->getElementsByTagName($tagName) as $element) {
+            $elements[] = new PHPDOMElement($element);
+        }
+
+        return $elements;
+    }
+
+    public function getElementByClass($class)
+    {
+        $elements = [];
+
+        if (is_array($class)) {
+            $expressionSet = [];
+            foreach ($class as $c) {
+                $expressionSet[] = 'contains(concat(" ", normalize-space(@class), " "), " ' . $c . ' ")';
+            }
+            $expression = implode(" and ", $expressionSet);
+        } else {
+            $expression = 'contains(concat(" ", normalize-space(@class), " "), " ' . $class . ' ")';
+        }
+
+        foreach ($this->XPath->query('//*[' . $expression . ']') as $element) {
+            $elements[] = new PHPDOMElement($element);
+        }
+
+        return $elements;
+    }
+
+    public function HTML()
+    {
+        return $this->DOMDocument()->saveHTML();
+    }
+
+    public function __call($name, $arguments)
+    {
+        call_user_func([$this->document, $name], ... $arguments);
+    }
+
+    public function __set($name, $value)
+    {
+        $this->document->{$name} = $value;
+    }
+
+    public function __get($name)
+    {
+        return $this->document->{$name};
+    }
+}
+
+interface DOMElementOperator
+{
+    /**
+     * @return \DOMElement
+     */
+    public function DOMElement();
+
+    /**
+     * @return array
+     */
+    public function getChildElements();
+
+    /**
+     * @return string mixed
+     */
+    public function getTagName();
+
+    /**
+     * @param string $name
+     * @return string
+     */
+    public function getAttribute($name);
+
+    /**
+     * @param string $tagName
+     * @return DOMElementOperator[]
+     */
+    public function getElementsByTagName($tagName);
+
+    /**
+     * @return string
+     */
+    public function getTextContent();
+
+    /**
+     * @param string $name
+     * @return bool
+     */
+    public function hasAttribute($name);
+
+    /**
+     * @return string
+     */
+    public function getHTMLCode();
+
+    /**
+     * @return string
+     */
+    public function getInnerHTMLCode();
+
+    /**
+     * @return mixed
+     */
+    public function remove();
+}
+
+class PHPDOMElement implements DOMElementOperator
+{
+    private $element;
+
+    public function __construct(\DOMElement $element)
+    {
+        $this->element = $element;
+    }
+
+    /**
+     * @return \DOMElement
+     */
+    public function DOMElement()
+    {
+        return $this->element;
+    }
+
+    public function getChildElements()
+    {
+        $nodes = [];
+        foreach ($this->element->childNodes as $node) {
+            if ($node instanceof \DOMElement) {
+                $nodes[] = new PHPDOMElement($node);
+            } else {
+                if ($node instanceof \DOMText) {
+                    $nodes[] = new PHPDOMText($node);
+                }
+            }
+        }
+
+        return $nodes;
+    }
+
+    public function getTagName()
+    {
+        return $this->element->tagName;
+    }
+
+    public function getAttribute($name)
+    {
+        return $this->element->getAttribute($name);
+    }
+
+    public function getElementsByTagName($tagName)
+    {
+        $elements = [];
+        foreach ($this->element->getElementsByTagName($tagName) as $element) {
+            $elements[] = new PHPDOMElement($element);
+        }
+
+        return $elements;
+    }
+
+    public function getTextContent()
+    {
+        return $this->element->textContent;
+    }
+
+    public function hasAttribute($name)
+    {
+        return $this->element->hasAttribute($name);
+    }
+
+    public function getHTMLCode()
+    {
+        return $this->element->ownerDocument->saveHTML($this->element);
+    }
+
+    public function getInnerHTMLCode()
+    {
+        $innerHTML = "";
+        foreach ($this->element->childNodes as $node) {
+            $innerHTML .= $node->ownerDocument->saveHTML($node);
+        }
+
+        return $innerHTML;
+    }
+
+    public function remove()
+    {
+        $this->DOMElement()->parentNode->removeChild($this->DOMElement());
+    }
+
+    public function __call($name, $arguments)
+    {
+        call_user_func([$this->element, $name], ... $arguments);
+    }
+}
+
+interface DOMElementFormOperator
+{
+    /**
+     * @return array
+     */
+    public function formSerializeArray();
+
+    /**
+     * @return DOMElementOperator[]
+     */
+    public function getElements();
+
+    /**
+     * @param DOMElementOperator $select
+     * @return DOMElementOperator[]
+     */
+    public static function getSelectOption(DOMElementOperator $select);
+}
+
+class PHPDOMElementFormOperator implements DOMElementFormOperator
+{
+    private $elementOperator;
+    private $elements = [];
+
+    public function __construct(DOMElementOperator $elementOperator)
+    {
+        $this->elementOperator = $elementOperator;
+        $this->elements = $this->findFormElements();
+    }
+
+    private function findFormElements()
+    {
+        $elements = [];
+
+        foreach ($this->elementOperator->getElementsByTagName("input") as $element) {
+            /**
+             * @var DOMElementOperator $element
+             */
+            $elements[$element->getAttribute("name")] = $element;
+        }
+
+        foreach ($this->elementOperator->getElementsByTagName("select") as $element) {
+            /**
+             * @var DOMElementOperator $element
+             */
+            $elements[$element->getAttribute("name")] = $element;
+        }
+
+        foreach ($this->elementOperator->getElementsByTagName("textarea") as $element) {
+            /**
+             * @var DOMElementOperator $element
+             */
+            $elements[$element->getAttribute("name")] = $element;
+        }
+
+        return $elements;
+    }
+
+    public static function getSelectOption(DOMElementOperator $select)
+    {
+        return $select->getElementsByTagName("option");
+    }
+
+    public function getElements()
+    {
+        return $this->elements;
+    }
+
+    public function formSerializeArray()
+    {
+        $elements = $this->findFormElements();
+
+        $formDatas = [];
+        foreach ($elements as $name => $element) {
+            /**
+             * @var DOMElementOperator $element
+             */
+            switch ($element->getTagName()) {
+                case "input":
+                    switch ($element->getAttribute("type")) {
+                        case "button":
+                        case "image":
+                            continue;
+                        case "radio":
+                            if (!$element->hasAttribute("checked")) {
+                                $formDatas[$name] = $element->getAttribute("value");
+                            }
+                            break;
+                        default:
+                            $formDatas[$name] = $element->getAttribute("value");
+                    }
+                    break;
+                case "select":
+                    foreach ($this->getSelectOption($element) as $option) {
+                        /**
+                         * @var \DOMElement $option
+                         */
+                        if ($option->hasAttribute("selected")) {
+                            $formDatas[$name] = $option->getAttribute("value");
+                            break;
+                        }
+                    }
+                    break;
+            }
+        }
+
+        return $formDatas;
+    }
+}
+
+interface DOMTextOperator
+{
+    /**
+     * @return string
+     */
+    public function getText();
+}
+
+class PHPDOMText implements DOMTextOperator
+{
+    private $DOMText;
+
+    public function __construct(\DOMText $DOMText)
+    {
+        $this->DOMText = $DOMText;
+    }
+
+    public function getText()
+    {
+        return $this->DOMText->textContent;
+    }
+
+    public function __call($name, $arguments)
+    {
+        call_user_func([$this->DOMText, $name], ... $arguments);
     }
 }
 
@@ -551,8 +1128,7 @@ class SmartCCDGUTNetwork
     {
         $this
             ->addHeader("XPS-Token: " . $credential->token)
-            ->addHeader("XPS-UserId: " . $credential->userId)
-        ;
+            ->addHeader("XPS-UserId: " . $credential->userId);
         return $this;
     }
 
