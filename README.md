@@ -7,6 +7,8 @@ curl
 
 json
 
+xml
+
 ## Usage
 Login first
 ```
