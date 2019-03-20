@@ -19,7 +19,8 @@ Available commands
         attendance USERNAME             Query attendance details.
         extraCredit USERNAME            Query extraCredit details.
         
-        ccdgutAuth USERNAME IP          CCDGUT Network authenticate
+        ccdgutAutoAuth USERNAME         CCDGUT Network authenticate, without manual IP input, APP login is requried.
+        ccdgutAuth USERNAME IP          CCDGUT Network authenticate, APP login is not required.
 ```
 
 Login first
@@ -34,7 +35,9 @@ Logout
 
 CCDGUT Network authenticate
 ```bash
-./SmartCCDGUT ccdgutAuth USERNAME IP # e.g. ./SmartCCDGUT ccdgutAuth 201535000000 10.20.0.0
+./SmartCCDGUT ccdgutAutoAuth USERNAME # e.g.: ./SmartCCDGUT ccdgutAutoAuth 201535000000
+# or manually specific IP address
+./SmartCCDGUT ccdgutAuth USERNAME IP # e.g.: ./SmartCCDGUT ccdgutAuth 201535000000 10.20.0.0
 ```
 
 Query electric usage details

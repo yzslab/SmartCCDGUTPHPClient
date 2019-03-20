@@ -25,6 +25,7 @@ abstract class Constants
 
     // Absolute URL
     const URLS = [
+        "ccdgutAutoAuth" => "http://10.20.208.220/ccdgutwx/zhwebapp/gong/logincityhot.jsp",
         "ccdgutAuth" => "http://10.20.208.220/ccdgutwx/zhuochuangAction/dy!loginCityHot.action",
     ];
 
@@ -85,7 +86,7 @@ final class Common
 
     final public static function log($text)
     {
-        self::fprintf(STDOUT, $text);
+        self::fprintf(STDOUT, "%s", $text);
     }
 
     final public static function logf($format, ... $args)
@@ -95,7 +96,7 @@ final class Common
 
     final public static function error($text)
     {
-        self::fprintf(STDERR, $text);
+        self::fprintf(STDERR, "%s", $text);
     }
 
     final public static function errorf($format, ... $args)
@@ -199,6 +200,7 @@ class CommandRouter
             "electric" => SmartCCDGUTElectricQueryController::class . "@query",
             "attendance" => SmartCCDGUTAttendanceController::class . "@query",
             "extraCredit" => SmartCCDGUTExtraCredit::class . "@query",
+            "ccdgutAutoAuth" => CCDGUTNetworkAuthenticate::class . "@autoAuth",
             "ccdgutAuth" => CCDGUTNetworkAuthenticate::class . "@auth",
         ];
 
@@ -235,6 +237,7 @@ class CommandRouter
                     "electric" => "https://smart-ccdgut.com/elecharge/data.php",
                     "attendance" => "http://wx.ccdgut.edu.cn:9000/zhcy.htm",
                     "extraCredit" => "http://218.16.63.158:8990/remote/token",
+                    "ccdgutAutoAuth" => Constants::URLS["ccdgutAutoAuth"],
                 ];
 
                 // These commands required login
@@ -243,6 +246,7 @@ class CommandRouter
                     "electric" => true,
                     "attendance" => true,
                     "extraCredit" => true,
+                    "ccdgutAutoAuth" => true,
                 ];
 
                 $command = $this->argv->command;
@@ -318,7 +322,8 @@ class CommandRouter
         Common::errorf("\tattendance USERNAME\t\tQuery attendance details." . PHP_EOL);
         Common::errorf("\textraCredit USERNAME\t\tQuery extraCredit details." . PHP_EOL);
         Common::errorf(PHP_EOL);
-        Common::errorf("\tccdgutAuth USERNAME IP\t\tCCDGUT Network authenticate." . PHP_EOL);
+        Common::errorf("\tccdgutAutoAuth USERNAME\t\tCCDGUT Network authenticate, without manual IP input, APP login is requried." . PHP_EOL);
+        Common::errorf("\tccdgutAuth USERNAME IP\t\tCCDGUT Network authenticate, APP login is not required." . PHP_EOL);
         Common::errorf(PHP_EOL . PHP_EOL);
         Common::errorf("Zhensheng Yuan: https://zhensheng.im." . PHP_EOL);
     }
@@ -648,6 +653,15 @@ class SmartCCDGUTExtraCredit
 
 class CCDGUTNetworkAuthenticate
 {
+    public function autoAuth(SmartCCDGUTNetwork $smartCCDGUTNetwork)
+    {
+        $response = $smartCCDGUTNetwork->preformOrFail();
+        if (!preg_match("#'(http://.*loginCityHot\.action.*)'#", $response, $matches))
+            return "Error: " . $response . PHP_EOL;
+        $loginURL = array_pop($matches);
+        return self::loginResponseHandler(file_get_contents($loginURL));
+    }
+
     public function auth(SmartCCDGUTNetwork $smartCCDGUTNetwork, $username, $IPAddress)
     {
         $response = $smartCCDGUTNetwork
@@ -655,6 +669,11 @@ class CCDGUTNetworkAuthenticate
             ->addPostField("sip", $IPAddress)
             ->preformOrFail()
         ;
+        return self::loginResponseHandler($response);
+    }
+
+    private static function loginResponseHandler($response)
+    {
         if (strstr($response, ">code=00<"))
             return "Authenticated successfully." . PHP_EOL;
         return "Error: " . $response;
