@@ -17,12 +17,15 @@ abstract class Constants
 
     const SLAT = 'jw134#%pqNLVfn';
 
+    // Relative URI based on self::HOST
     const APP_URIS = [
         "login" => "/app/user/login",
         "logout" => "/app/user/logout",
     ];
 
+    // Absolute URL
     const URLS = [
+        "ccdgutAuth" => "http://10.20.208.220/ccdgutwx/zhuochuangAction/dy!loginCityHot.action",
     ];
 
     const USER_DIRECTORY = __DIR__ . "/users/";
@@ -196,6 +199,7 @@ class CommandRouter
             "electric" => SmartCCDGUTElectricQueryController::class . "@query",
             "attendance" => SmartCCDGUTAttendanceController::class . "@query",
             "extraCredit" => SmartCCDGUTExtraCredit::class . "@query",
+            "ccdgutAuth" => CCDGUTNetworkAuthenticate::class . "@auth",
         ];
 
         $this->singletons = [
@@ -313,6 +317,8 @@ class CommandRouter
         Common::errorf("\telectric USERNAME\t\tQuery electric usage details." . PHP_EOL);
         Common::errorf("\tattendance USERNAME\t\tQuery attendance details." . PHP_EOL);
         Common::errorf("\textraCredit USERNAME\t\tQuery extraCredit details." . PHP_EOL);
+        Common::errorf(PHP_EOL);
+        Common::errorf("\tccdgutAuth USERNAME IP\t\tCCDGUT Network authenticate." . PHP_EOL);
         Common::errorf(PHP_EOL . PHP_EOL);
         Common::errorf("Zhensheng Yuan: https://zhensheng.im." . PHP_EOL);
     }
@@ -637,6 +643,21 @@ class SmartCCDGUTExtraCredit
         }
 
         return $text;
+    }
+}
+
+class CCDGUTNetworkAuthenticate
+{
+    public function auth(SmartCCDGUTNetwork $smartCCDGUTNetwork, $username, $IPAddress)
+    {
+        $response = $smartCCDGUTNetwork
+            ->addPostField("uid", $username)
+            ->addPostField("sip", $IPAddress)
+            ->preformOrFail()
+        ;
+        if (strstr($response, ">code=00<"))
+            return "Authenticated successfully." . PHP_EOL;
+        return "Error: " . $response;
     }
 }
 
