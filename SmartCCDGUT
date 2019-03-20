@@ -228,7 +228,7 @@ class CommandRouter
             SmartCCDGUTNetwork::class => function () use ($credentialCreator) {
                 // These urls required token
                 static $tokenRequiredUrls = [
-                    "electric" => "http://smart-ccdgut.com/data.php",
+                    "electric" => "https://smart-ccdgut.com/elecharge/data.php",
                     "attendance" => "http://wx.ccdgut.edu.cn:9000/zhcy.htm",
                     "extraCredit" => "http://218.16.63.158:8990/remote/token",
                 ];
@@ -565,7 +565,7 @@ class SmartCCDGUTElectricQueryController
         }
 
         $smartCCDGUTNetwork
-            ->addHeader("Referer: http://smart-ccdgut.com/index.php")
+            ->addHeader("Referer: https://smart-ccdgut.com/elecharge/index.php")
             ->addPostField("loudong", $area)
             ->addPostField("sushe", $room)
             ->addPostField("token", $credential->token)
